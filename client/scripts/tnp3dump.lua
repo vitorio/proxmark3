@@ -31,7 +31,7 @@ Arguments:
 	-o             : filename for the saved dumps
 ]]
 local RANDOM = '20436F707972696768742028432920323031302041637469766973696F6E2E20416C6C205269676874732052657365727665642E20'
-local TIMEOUT = 2000 -- Shouldn't take longer than 2 seconds
+local TIMEOUT = 4000 -- Shouldn't take longer than 2 seconds
 local DEBUG = false -- the debug flag
 local numBlocks = 64
 local numSectors = 16
@@ -92,6 +92,20 @@ local function waitCmd()
 		end
 	end
 	return nil, "No response from device"
+end
+
+function sendRaw(rawdata)
+	print(">> ", rawdata)
+	
+	local flags = lib14a.ISO14A_COMMAND.ISO14A_NO_DISCONNECT + lib14a.ISO14A_COMMAND.ISO14A_RAW
+
+	local command = Command:new{cmd = cmds.CMD_READER_ISO_14443a, 
+									arg1 = flags, -- Send raw 
+									-- arg2 contains the length, which is half the length 
+									-- of the ASCII-string rawdata
+									arg2 = string.len(rawdata)/2, 
+									data = rawdata}
+	return lib14a.sendToDevice(command, false)
 end
 
 local function main(args)
@@ -173,12 +187,35 @@ local function main(args)
 	local block1, err = waitCmd()
 	if err then return oops(err) end
 
+	print( string.rep('--',20) )
+	
+	local uid = block0:sub(1,8)
+	local toytype = block1:sub(1,4)
+	local cardidLsw = block1:sub(9,16)
+	local cardidMsw = block1:sub(16,24)
+	local cardid = block1:sub(9,24)
+	local subtype = block1:sub(25,28)
+	
+	-- Show info 
+
+	local item = toys.Find(toytype, subtype)
+	if item then
+		print(('            ITEM TYPE : %s - %s (%s)'):format(item[6],item[5], item[4]) )
+	else
+		print(('            ITEM TYPE : 0x%s 0x%s'):format(toytype, subtype))
+	end
+
+	print( ('                  UID : 0x%s'):format(uid) )
+	print( ('               CARDID : 0x%s'):format(cardid ) )
+	print( string.rep('--',20) )
+
 	local tmpHash = block0..block1..'%02x'..RANDOM
 
 	local key
 	local pos = 0
 	local blockNo
-	local blocks = {}
+	local decblocks = {}
+	local encblocks = {}
 
 	print('Reading card data')
 	core.clearCommandBuffer()
@@ -198,42 +235,56 @@ local function main(args)
 		local err = core.SendCommand(cmd:getBytes())
 		if err then return oops(err) end
 		local blockdata, err = waitCmd()
-		if err then return oops(err) end		
-
+		if err then
+			local res,err = sendRaw('D44A0100')
+			if err then return oops(err) end
+			local cmd_response = Command.parse(res)
+			local len = tonumber(cmd_response.arg1) *2
+			local data = string.sub(tostring(cmd_response.data), 0, len);
+			print("<< ",data)						
+			err = core.SendCommand(cmd:getBytes())
+			if err then return oops(err) end
+			blockdata, err = waitCmd()
+			if err then return oops(err) end
+		end
 
 		if  blockNo%4 ~= 3 then
 		
 			if blockNo < 8 then
 				-- Block 0-7 not encrypted
-				blocks[blockNo+1] = ('%02d  :: %s'):format(blockNo,blockdata)
+				decblocks[blockNo+1] = ('%02d  :: %s'):format(blockNo,blockdata)
+				encblocks[blockNo+1] = ('%02d  :: %s'):format(blockNo,blockdata)
 			else
 				-- blocks with zero not encrypted.
 				if string.find(blockdata, '^0+$') then
-					blocks[blockNo+1] = ('%02d  :: %s'):format(blockNo,blockdata)
+					decblocks[blockNo+1] = ('%02d  :: %s'):format(blockNo,blockdata)
+					encblocks[blockNo+1] = ('%02d  :: %s'):format(blockNo,blockdata)
 				else
+					encblocks[blockNo+1] = ('%02d  :: %s'):format(blockNo,blockdata)
 					local baseStr = utils.ConvertHexToAscii(tmpHash:format(blockNo))
 					local key = md5.sumhexa(baseStr)
 					local aestest = core.aes128_decrypt(key, blockdata)
 					local hex = utils.ConvertAsciiToBytes(aestest)
 					hex = utils.ConvertBytesToHex(hex)
-					blocks[blockNo+1] = ('%02d  :: %s'):format(blockNo,hex)
+					decblocks[blockNo+1] = ('%02d  :: %s'):format(blockNo,hex)
 					io.write(blockNo..',')
 				end		
 			end
 		else
 			-- Sectorblocks, not encrypted
-			blocks[blockNo+1] = ('%02d  :: %s%s'):format(blockNo,key,blockdata:sub(13,32)) 
+			decblocks[blockNo+1] = ('%02d  :: %s%s'):format(blockNo,key,blockdata:sub(13,32)) 
+			encblocks[blockNo+1] = ('%02d  :: %s%s'):format(blockNo,key,blockdata:sub(13,32)) 
 		end
 	end
 	io.write('\n')
 	
 	core.clearCommandBuffer()
 		
-	-- Print results
+	-- Print encrypted results
 	local bindata = {}
 	local emldata = ''
 
-	for _,s in pairs(blocks) do
+	for _,s in pairs(encblocks) do
 		local slice = s:sub(8,#s)
 		local str = utils.ConvertBytesToAscii(
 				 utils.ConvertHexToBytes(slice)
@@ -244,35 +295,37 @@ local function main(args)
 		end		
 	end 
 
-	print( string.rep('--',20) )
-	
-	local uid = block0:sub(1,8)
-	local toytype = block1:sub(1,4)
-	local cardidLsw = block1:sub(9,16)
-	local cardidMsw = block1:sub(16,24)
-	local cardid = block1:sub(9,24)
-	local subtype = block1:sub(25,28)
-	
 	-- Write dump to files
 	if not DEBUG then
-		local foo = dumplib.SaveAsBinary(bindata, outputTemplate..'-'..uid..'.bin')
-		print(("Wrote a BIN dump to:  %s"):format(foo))
-		local bar = dumplib.SaveAsText(emldata, outputTemplate..'-'..uid..'.eml')
-		print(("Wrote a EML dump to:  %s"):format(bar))
+		local foo = dumplib.SaveAsBinary(bindata, outputTemplate..'-'..uid..'-enc.bin')
+		print(("Wrote an encrypted BIN dump to:  %s"):format(foo))
+		local bar = dumplib.SaveAsText(emldata, outputTemplate..'-'..uid..'-enc.eml')
+		print(("Wrote an encrypted EML dump to:  %s"):format(bar))
 	end
 	
-	print( string.rep('--',20) )
-	-- Show info 
+	-- Print decrypted results
+	local bindata = {}
+	local emldata = ''
 
-	local item = toys.Find(toytype, subtype)
-	if item then
-		print(('            ITEM TYPE : %s - %s (%s)'):format(item[6],item[5], item[4]) )
-	else
-		print(('            ITEM TYPE : 0x%s 0x%s'):format(toytype, subtype))
+	for _,s in pairs(decblocks) do
+		local slice = s:sub(8,#s)
+		local str = utils.ConvertBytesToAscii(
+				 utils.ConvertHexToBytes(slice)
+				)
+		emldata = emldata..slice..'\n'
+		for c in (str):gmatch('.') do
+			bindata[#bindata+1] = c
+		end		
+	end 
+
+	-- Write dump to files
+	if not DEBUG then
+		local foo = dumplib.SaveAsBinary(bindata, outputTemplate..'-'..uid..'-dec.bin')
+		print(("Wrote a decrypted BIN dump to:  %s"):format(foo))
+		local bar = dumplib.SaveAsText(emldata, outputTemplate..'-'..uid..'-dec.eml')
+		print(("Wrote a decrypted EML dump to:  %s"):format(bar))
 	end
-
-	print( ('                  UID : 0x%s'):format(uid) )
-	print( ('               CARDID : 0x%s'):format(cardid ) )
+	
 	print( string.rep('--',20) )
 	
 	core.clearCommandBuffer()
