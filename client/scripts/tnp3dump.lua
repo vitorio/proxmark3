@@ -94,7 +94,16 @@ local function waitCmd()
 	return nil, "No response from device"
 end
 
-function sendRaw(rawdata)
+function showdata(usbpacket)
+	local cmd_response = Command.parse(usbpacket)
+	local len = tonumber(cmd_response.arg1) *2
+	--print("data length:",len)
+	local data = string.sub(tostring(cmd_response.data), 0, len);
+	print("<< ",data)
+	--print("----------------")
+end
+
+function sendRaw(rawdata, options)
 	print(">> ", rawdata)
 	
 	local flags = lib14a.ISO14A_COMMAND.ISO14A_NO_DISCONNECT + lib14a.ISO14A_COMMAND.ISO14A_RAW
@@ -105,8 +114,19 @@ function sendRaw(rawdata)
 									-- of the ASCII-string rawdata
 									arg2 = string.len(rawdata)/2, 
 									data = rawdata}
-	return lib14a.sendToDevice(command, false)
+	return lib14a.sendToDevice(command, options.ignore_response) 
 end
+
+-- Sends an instruction to do nothing, only disconnect
+function disconnect()
+
+	local command = Command:new{cmd = cmds.CMD_READER_ISO_14443a, 
+									arg1 = 0, -- Nothing 
+									}
+	-- We can ignore the response here, no ACK is returned for this command
+	-- Check /armsrc/iso14443a.c, ReaderIso14443a() for details
+	return lib14a.sendToDevice(command,true) 
+end								
 
 local function main(args)
 
@@ -120,7 +140,7 @@ local function main(args)
 	local usePreCalc = false
 	local cmdReadBlockString = 'hf mf rdbl %d A %s'
 	local input = "dumpkeys.bin"
-	local outputTemplate = os.date("toydump_%Y-%m-%d_%H%M%S");
+	local outputTemplate = '';
 
 	-- Arguments for the script
 	for o, a in getopt.getopt(args, 'hk:npo:') do
@@ -236,12 +256,13 @@ local function main(args)
 		if err then return oops(err) end
 		local blockdata, err = waitCmd()
 		if err then
-			local res,err = sendRaw('D44A0100')
-			if err then return oops(err) end
-			local cmd_response = Command.parse(res)
-			local len = tonumber(cmd_response.arg1) *2
-			local data = string.sub(tostring(cmd_response.data), 0, len);
-			print("<< ",data)						
+			rinfo, rerr = lib14a.read1443a(true)
+			if rerr then return oops(rerr) end
+			rres,rerr = sendRaw('D44A0100',{ignore_response = false})
+			if rerr then return oops(rerr) end
+			showdata(rres)
+			disconnect()
+			
 			err = core.SendCommand(cmd:getBytes())
 			if err then return oops(err) end
 			blockdata, err = waitCmd()
@@ -280,54 +301,57 @@ local function main(args)
 	
 	core.clearCommandBuffer()
 		
-	-- Print encrypted results
-	local bindata = {}
-	local emldata = ''
+	if outputTemplate ~= '' then
+	
+		-- Print encrypted results
+		local bindata = {}
+		local emldata = ''
 
-	for _,s in pairs(encblocks) do
-		local slice = s:sub(8,#s)
-		local str = utils.ConvertBytesToAscii(
-				 utils.ConvertHexToBytes(slice)
-				)
-		emldata = emldata..slice..'\n'
-		for c in (str):gmatch('.') do
-			bindata[#bindata+1] = c
-		end		
-	end 
+		for _,s in pairs(encblocks) do
+			local slice = s:sub(8,#s)
+			local str = utils.ConvertBytesToAscii(
+					 utils.ConvertHexToBytes(slice)
+					)
+			emldata = emldata..slice..'\n'
+			for c in (str):gmatch('.') do
+				bindata[#bindata+1] = c
+			end		
+		end 
 
-	-- Write dump to files
-	if not DEBUG then
-		local foo = dumplib.SaveAsBinary(bindata, outputTemplate..'-'..uid..'-enc.bin')
-		print(("Wrote an encrypted BIN dump to:  %s"):format(foo))
-		local bar = dumplib.SaveAsText(emldata, outputTemplate..'-'..uid..'-enc.eml')
-		print(("Wrote an encrypted EML dump to:  %s"):format(bar))
+		-- Write dump to files
+		if not DEBUG then
+			local foo = dumplib.SaveAsBinary(bindata, outputTemplate..'-'..uid..'-enc.bin')
+			print(("Wrote an encrypted BIN dump to:  %s"):format(foo))
+			local bar = dumplib.SaveAsText(emldata, outputTemplate..'-'..uid..'-enc.eml')
+			print(("Wrote an encrypted EML dump to:  %s"):format(bar))
+		end
+	
+		-- Print decrypted results
+		local bindata = {}
+		local emldata = ''
+
+		for _,s in pairs(decblocks) do
+			local slice = s:sub(8,#s)
+			local str = utils.ConvertBytesToAscii(
+					 utils.ConvertHexToBytes(slice)
+					)
+			emldata = emldata..slice..'\n'
+			for c in (str):gmatch('.') do
+				bindata[#bindata+1] = c
+			end		
+		end 
+
+		-- Write dump to files
+		if not DEBUG then
+			local foo = dumplib.SaveAsBinary(bindata, outputTemplate..'-'..uid..'-dec.bin')
+			print(("Wrote a decrypted BIN dump to:  %s"):format(foo))
+			local bar = dumplib.SaveAsText(emldata, outputTemplate..'-'..uid..'-dec.eml')
+			print(("Wrote a decrypted EML dump to:  %s"):format(bar))
+		end
+	
+		print( string.rep('--',20) )
+	
+		core.clearCommandBuffer()
 	end
-	
-	-- Print decrypted results
-	local bindata = {}
-	local emldata = ''
-
-	for _,s in pairs(decblocks) do
-		local slice = s:sub(8,#s)
-		local str = utils.ConvertBytesToAscii(
-				 utils.ConvertHexToBytes(slice)
-				)
-		emldata = emldata..slice..'\n'
-		for c in (str):gmatch('.') do
-			bindata[#bindata+1] = c
-		end		
-	end 
-
-	-- Write dump to files
-	if not DEBUG then
-		local foo = dumplib.SaveAsBinary(bindata, outputTemplate..'-'..uid..'-dec.bin')
-		print(("Wrote a decrypted BIN dump to:  %s"):format(foo))
-		local bar = dumplib.SaveAsText(emldata, outputTemplate..'-'..uid..'-dec.eml')
-		print(("Wrote a decrypted EML dump to:  %s"):format(bar))
-	end
-	
-	print( string.rep('--',20) )
-	
-	core.clearCommandBuffer()
 end
 main(args)

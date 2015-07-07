@@ -209,6 +209,7 @@ local function ValidateCheckSums(blocks)
 	io.write( ('TYPE 3 area 2: %04x = %04x -- %s\n'):format(crc,calc,isOk))
 end
 
+local function LoadEmulator(blocks)
 	local cmd
 	local blockdata
 	for _,b in pairs(blocks) do 
@@ -476,15 +477,35 @@ local function main(args)
 	
 		print('Validating all checksums')	
 		ValidateCheckSums(blocks)
+		-- Experience should be:  	
+		local experience = blocks[8]:sub(1,6)
+		print(('Experience  : %d'):format(utils.SwapEndianness(experience,16)))
+	
+		local money = blocks[8]:sub(7,10)
+		print(('Money       : %d'):format(utils.SwapEndianness(money,16)))
+		
+		local level = blocks[13]:sub(27,28)
+		print(('LEVEL : %d'):format( tonumber(level,16)))
+		--hälsa: 667 029b  
+		--local health = blocks[]:sub();
+		--print(('Health : %d'):format( tonumber(health,16))
+	
+		--0x0D    0x29    0x0A    0x02    16-bit hero points value. Maximum 100.
+		local heropoints = blocks[13]:sub(20,23)
+		print(('Hero points : %d'):format(utils.SwapEndianness(heropoints,16)))
+
+		--0x10    0x2C    0x0C    0x04    32 bit flag value indicating heroic challenges completed.
+		local challenges = blocks[16]:sub(25,32)
+		print(('Finished hero challenges : %d'):format(utils.SwapEndianness(challenges,32)))
 	end
 	
 	--Load dumpdata to emulator memory
-	if DEBUG then
-		print('Sending dumpdata to emulator memory')
-		err = LoadEmulator(blocks)
-		if err then return oops(err) end	
-		core.clearCommandBuffer()
-		print('The simulation is now prepared.\n --> run \"hf mf sim u '..uid..'\" <--')
-	end
+	--if DEBUG then
+		--print('Sending dumpdata to emulator memory')
+		--err = LoadEmulator(blocks)
+		--if err then return oops(err) end	
+		--core.clearCommandBuffer()
+		--print('The simulation is now prepared.\n --> run \"hf mf sim u '..uid..'\" <--')
+	--end
 end
 main(args)
